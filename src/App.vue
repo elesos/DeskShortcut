@@ -224,7 +224,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
-import { getCurrentWindow } from '@tauri-apps/api/window';
+import { currentMonitor, cursorPosition, getCurrentWindow } from '@tauri-apps/api/window';
 
 type ShortcutInfo = {
   name: string;
@@ -309,6 +309,8 @@ const dataLocationText = '本地数据保存在应用数据目录的 deskshortcu
 let toastTimer = 0;
 let hideTimer = 0;
 let snapTimer = 0;
+let revealTimer = 0;
+let revealInFlight = false;
 let dragUnlisten: (() => void) | null = null;
 
 const contextMenu = reactive<{
@@ -344,6 +346,7 @@ onMounted(async () => {
   dragUnlisten = await appWindow.onDragDropEvent((event: any) => {
     if (event.payload?.type === 'over') {
       isDragOver.value = true;
+      void showDockedWindow();
       return;
     }
     if (event.payload?.type === 'leave') {
@@ -358,6 +361,7 @@ onMounted(async () => {
   });
 
   snapTimer = window.setInterval(checkDockSnap, 900);
+  revealTimer = window.setInterval(checkDockReveal, 120);
 });
 
 onBeforeUnmount(() => {
@@ -366,6 +370,7 @@ onBeforeUnmount(() => {
   window.clearTimeout(toastTimer);
   window.clearTimeout(hideTimer);
   window.clearInterval(snapTimer);
+  window.clearInterval(revealTimer);
   dragUnlisten?.();
 });
 
@@ -766,6 +771,80 @@ async function showDockedWindow() {
   } catch {
     // Ignore window positioning failures here; the next snap check can recover.
   }
+}
+
+async function checkDockReveal() {
+  if (!canAutoHide() || revealInFlight) return;
+  revealInFlight = true;
+  try {
+    const [pointer, monitor, position, size] = await Promise.all([
+      cursorPosition(),
+      currentMonitor(),
+      appWindow.outerPosition(),
+      appWindow.outerSize()
+    ]);
+
+    if (!monitor || !isHiddenDockedWindow(position, size, monitor)) return;
+    if (isPointerInDockTrigger(pointer, position, size, monitor)) await showDockedWindow();
+  } catch {
+    // Cursor polling is only a reveal fallback; mouseenter/click behavior can still work.
+  } finally {
+    revealInFlight = false;
+  }
+}
+
+function isHiddenDockedWindow(
+  position: { x: number; y: number },
+  size: { width: number; height: number },
+  monitor: { position: { x: number; y: number }; size: { width: number; height: number } }
+) {
+  const triggerBand = 16;
+  const monitorLeft = monitor.position.x;
+  const monitorTop = monitor.position.y;
+  const monitorRight = monitorLeft + monitor.size.width;
+
+  if (state.settings.dockPosition === 'top') return position.y + size.height <= monitorTop + triggerBand;
+  if (state.settings.dockPosition === 'left') return position.x + size.width <= monitorLeft + triggerBand;
+  if (state.settings.dockPosition === 'right') return position.x >= monitorRight - triggerBand;
+  return false;
+}
+
+function isPointerInDockTrigger(
+  pointer: { x: number; y: number },
+  position: { x: number; y: number },
+  size: { width: number; height: number },
+  monitor: { position: { x: number; y: number }; size: { width: number; height: number } }
+) {
+  const triggerBand = 16;
+  const monitorLeft = monitor.position.x;
+  const monitorTop = monitor.position.y;
+  const monitorRight = monitorLeft + monitor.size.width;
+
+  if (state.settings.dockPosition === 'top') {
+    return (
+      pointer.y <= monitorTop + triggerBand &&
+      pointer.x >= position.x &&
+      pointer.x <= position.x + size.width
+    );
+  }
+
+  if (state.settings.dockPosition === 'left') {
+    return (
+      pointer.x <= monitorLeft + triggerBand &&
+      pointer.y >= position.y &&
+      pointer.y <= position.y + size.height
+    );
+  }
+
+  if (state.settings.dockPosition === 'right') {
+    return (
+      pointer.x >= monitorRight - triggerBand &&
+      pointer.y >= position.y &&
+      pointer.y <= position.y + size.height
+    );
+  }
+
+  return false;
 }
 
 function queueHideDockedWindow() {
