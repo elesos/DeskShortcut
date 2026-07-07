@@ -1,0 +1,28 @@
+[package]
+name = "deskshortcut"
+version = "0.1.0"
+description = "A lightweight Windows desktop shortcut manager."
+authors = ["DeskShortcut"]
+edition = "2021"
+
+[lib]
+name = "deskshortcut_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_System_Com",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging"
+] }
