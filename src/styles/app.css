@@ -105,6 +105,11 @@ button:disabled {
   background: rgb(255 255 255 / 12%);
 }
 
+.close-button:hover {
+  color: #ffffff;
+  background: #b42318;
+}
+
 .groupbar {
   display: flex;
   align-items: center;

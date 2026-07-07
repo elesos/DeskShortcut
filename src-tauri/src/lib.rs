@@ -4,7 +4,11 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-use tauri::{AppHandle, Manager, PhysicalPosition};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    App, AppHandle, Manager, PhysicalPosition,
+};
 use uuid::Uuid;
 
 const UNGROUPED_ID: &str = "group-ungrouped";
@@ -101,6 +105,10 @@ pub struct DockResult {
 
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            setup_tray(app)?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_app_state,
             save_app_state,
@@ -108,6 +116,10 @@ pub fn run() {
             delete_shortcut_file,
             launch_shortcut,
             open_target_folder,
+            minimize_window,
+            hide_window_to_tray,
+            show_main_window,
+            exit_app,
             set_window_always_on_top,
             set_launch_at_startup,
             snap_window_if_near_edge,
@@ -116,6 +128,45 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run DeskShortcut");
+}
+
+fn setup_tray(app: &mut App) -> tauri::Result<()> {
+    let show_item = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
+    let hide_item = MenuItem::with_id(app, "hide", "隐藏到托盘", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show_item, &hide_item, &quit_item])?;
+
+    let mut tray = TrayIconBuilder::with_id("main-tray")
+        .tooltip("DeskShortcut")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "show" => {
+                let _ = show_window(app);
+            }
+            "hide" => {
+                let _ = hide_window(app);
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                let _ = show_window(tray.app_handle());
+            }
+        });
+
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+
+    tray.build(app)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -202,6 +253,31 @@ fn open_target_folder(app: AppHandle, shortcut_id: String) -> Result<(), String>
         .ok_or_else(|| "快捷方式记录不存在".to_string())?;
 
     platform::open_target_folder(&shortcut.target_path)
+}
+
+#[tauri::command]
+fn minimize_window(app: AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "主窗口不存在".to_string())?;
+    window
+        .minimize()
+        .map_err(|error| format!("最小化窗口失败：{error}"))
+}
+
+#[tauri::command]
+fn hide_window_to_tray(app: AppHandle) -> Result<(), String> {
+    hide_window(&app)
+}
+
+#[tauri::command]
+fn show_main_window(app: AppHandle) -> Result<(), String> {
+    show_window(&app)
+}
+
+#[tauri::command]
+fn exit_app(app: AppHandle) {
+    app.exit(0);
 }
 
 #[tauri::command]
@@ -332,6 +408,30 @@ fn move_docked_window(app: AppHandle, position: &str, hide: bool) -> Result<(), 
     window
         .set_position(next)
         .map_err(|error| format!("移动窗口失败：{error}"))
+}
+
+fn show_window(app: &AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "主窗口不存在".to_string())?;
+    window
+        .unminimize()
+        .map_err(|error| format!("恢复窗口失败：{error}"))?;
+    window
+        .show()
+        .map_err(|error| format!("显示窗口失败：{error}"))?;
+    window
+        .set_focus()
+        .map_err(|error| format!("激活窗口失败：{error}"))
+}
+
+fn hide_window(app: &AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "主窗口不存在".to_string())?;
+    window
+        .hide()
+        .map_err(|error| format!("隐藏到托盘失败：{error}"))
 }
 
 fn state_file_path(app: &AppHandle) -> Result<PathBuf, String> {

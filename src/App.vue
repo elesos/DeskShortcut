@@ -15,6 +15,9 @@
           {{ state.settings.isPinned ? '●' : '○' }}
         </button>
         <button class="icon-button" title="设置" @click="settingsOpen = true">⚙</button>
+        <button class="icon-button" title="最小化" @click="minimizeWindow">−</button>
+        <button class="icon-button" title="隐藏到托盘" @click="hideToTray">▾</button>
+        <button class="icon-button close-button" title="退出" @click="exitApp">×</button>
       </div>
     </header>
 
@@ -480,7 +483,7 @@ async function launch(shortcut: ShortcutRecord) {
   try {
     const result = await invoke<{ launched: boolean; warning: string }>('launch_shortcut', { shortcutId: shortcut.id });
     notify(result.warning || '已启动');
-    if (state.settings.hideAfterLaunch) await hideDockedWindowNow();
+    if (state.settings.hideAfterLaunch) await hideToTray();
   } catch (error) {
     notify(String(error));
   }
@@ -637,6 +640,26 @@ async function saveSettings() {
 async function togglePinned() {
   state.settings.isPinned = !state.settings.isPinned;
   await saveState();
+}
+
+async function minimizeWindow() {
+  try {
+    await invoke('minimize_window');
+  } catch (error) {
+    notify(String(error));
+  }
+}
+
+async function hideToTray() {
+  try {
+    await invoke('hide_window_to_tray');
+  } catch (error) {
+    notify(String(error));
+  }
+}
+
+async function exitApp() {
+  await invoke('exit_app');
 }
 
 async function clearData() {
