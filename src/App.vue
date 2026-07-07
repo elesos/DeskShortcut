@@ -5,7 +5,7 @@
     @mouseenter="showDockedWindow"
     @mouseleave="queueHideDockedWindow"
   >
-    <header class="titlebar" data-tauri-drag-region>
+    <header class="titlebar" data-tauri-drag-region @mousedown="startWindowDrag">
       <div class="brand" data-tauri-drag-region>
         <span class="brand-mark">DS</span>
         <span data-tauri-drag-region>DeskShortcut</span>
@@ -704,6 +704,18 @@ function openGroupMenu(event: MouseEvent, group: GroupRecord | null) {
 
 function closeContextMenu() {
   contextMenu.open = false;
+}
+
+async function startWindowDrag(event: MouseEvent) {
+  if (event.button !== 0) return;
+  const target = event.target as HTMLElement | null;
+  if (target?.closest('button, input, select, textarea, a')) return;
+
+  try {
+    await appWindow.startDragging();
+  } catch {
+    // The data-tauri-drag-region attribute still covers platforms where it is supported.
+  }
 }
 
 async function menuLaunch() {
