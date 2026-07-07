@@ -409,7 +409,7 @@ mod platform {
     use super::{LaunchResult, ShortcutInfo, ShortcutRecord};
     use std::{ffi::OsStr, os::windows::ffi::OsStrExt, path::Path, ptr};
     use windows::{
-        core::{Interface, PCWSTR, PWSTR},
+        core::{Interface, PCWSTR},
         Win32::{
             Foundation::MAX_PATH,
             System::Com::{
@@ -457,25 +457,29 @@ mod platform {
         let mut icon_path = [0u16; MAX_PATH as usize];
         let mut description = [0u16; 1024];
         let mut icon_index = 0;
-        let mut show_command = 0;
+        let mut show_command = SW_SHOWNORMAL.0;
         let mut hotkey = 0;
 
         unsafe {
             shell_link
-                .GetPath(PWSTR(target.as_mut_ptr()), target.len() as i32, ptr::null_mut(), SLGP_RAWPATH)
+                .GetPath(&mut target, ptr::null_mut(), SLGP_RAWPATH)
                 .map_err(|error| format!("读取目标路径失败：{error}"))?;
             shell_link
-                .GetArguments(PWSTR(arguments.as_mut_ptr()), arguments.len() as i32)
+                .GetArguments(&mut arguments)
                 .map_err(|error| format!("读取启动参数失败：{error}"))?;
             shell_link
-                .GetWorkingDirectory(PWSTR(working_directory.as_mut_ptr()), working_directory.len() as i32)
+                .GetWorkingDirectory(&mut working_directory)
                 .map_err(|error| format!("读取工作目录失败：{error}"))?;
             shell_link
-                .GetIconLocation(PWSTR(icon_path.as_mut_ptr()), icon_path.len() as i32, &mut icon_index)
+                .GetIconLocation(&mut icon_path, &mut icon_index)
                 .map_err(|error| format!("读取图标失败：{error}"))?;
-            let _ = shell_link.GetDescription(PWSTR(description.as_mut_ptr()), description.len() as i32);
-            let _ = shell_link.GetShowCmd(&mut show_command);
-            let _ = shell_link.GetHotkey(&mut hotkey);
+            let _ = shell_link.GetDescription(&mut description);
+            if let Ok(value) = shell_link.GetShowCmd() {
+                show_command = value.0;
+            }
+            if let Ok(value) = shell_link.GetHotkey() {
+                hotkey = value;
+            }
         }
 
         let target_path = from_wide(&target);
