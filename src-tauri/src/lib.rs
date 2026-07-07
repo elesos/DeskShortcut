@@ -462,7 +462,7 @@ mod platform {
 
         unsafe {
             shell_link
-                .GetPath(&mut target, ptr::null_mut(), SLGP_RAWPATH.0)
+                .GetPath(&mut target, ptr::null_mut(), SLGP_RAWPATH.0 as u32)
                 .map_err(|error| format!("读取目标路径失败：{error}"))?;
             shell_link
                 .GetArguments(&mut arguments)
