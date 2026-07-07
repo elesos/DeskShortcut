@@ -546,7 +546,13 @@ fn new_id(prefix: &str) -> String {
 #[cfg(windows)]
 mod platform {
     use super::{LaunchResult, ShortcutInfo, ShortcutRecord};
-    use std::{ffi::OsStr, os::windows::ffi::OsStrExt, path::Path, process::Command, ptr};
+    use std::{
+        ffi::OsStr,
+        os::windows::{ffi::OsStrExt, process::CommandExt},
+        path::Path,
+        process::Command,
+        ptr,
+    };
     use windows::{
         core::{Interface, PCWSTR},
         Win32::{
@@ -561,6 +567,8 @@ mod platform {
             },
         },
     };
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
 
     pub fn parse_shortcut(path: &Path) -> Result<ShortcutInfo, String> {
         if !path.exists() {
@@ -664,51 +672,103 @@ public static class DeskShortcutIconExtractor {
   public static extern bool DestroyIcon(IntPtr handle);
 }
 '@
-$iconPath = [Environment]::ExpandEnvironmentVariables($args[0])
-$targetPath = [Environment]::ExpandEnvironmentVariables($args[1])
-$iconIndex = [int]$args[2]
-$source = $null
-if (![string]::IsNullOrWhiteSpace($iconPath) -and (Test-Path -LiteralPath $iconPath)) {
-  $source = $iconPath
-} elseif (![string]::IsNullOrWhiteSpace($targetPath) -and (Test-Path -LiteralPath $targetPath)) {
-  $source = $targetPath
+
+function Resolve-ExistingPath([string]$path) {
+  if ([string]::IsNullOrWhiteSpace($path)) { return $null }
+  $expanded = [Environment]::ExpandEnvironmentVariables($path)
+  if (Test-Path -LiteralPath $expanded -PathType Leaf) { return $expanded }
+  return $null
 }
-if ($null -eq $source) { exit 2 }
-$icon = $null
-$bitmap = $null
-$stream = $null
-try {
-  if ([IO.Path]::GetExtension($source).ToLowerInvariant() -eq '.ico') {
-    $icon = New-Object System.Drawing.Icon($source)
-  } else {
-    $large = New-Object IntPtr[] 1
-    $small = New-Object IntPtr[] 1
-    [void][DeskShortcutIconExtractor]::ExtractIconEx($source, $iconIndex, $large, $small, 1)
-    $handle = if ($large[0] -ne [IntPtr]::Zero) { $large[0] } else { $small[0] }
-    if ($handle -ne [IntPtr]::Zero) {
-      $icon = [System.Drawing.Icon]::FromHandle($handle).Clone()
-      [void][DeskShortcutIconExtractor]::DestroyIcon($handle)
-      if ($large[0] -ne [IntPtr]::Zero -and $large[0] -ne $handle) { [void][DeskShortcutIconExtractor]::DestroyIcon($large[0]) }
-      if ($small[0] -ne [IntPtr]::Zero -and $small[0] -ne $handle) { [void][DeskShortcutIconExtractor]::DestroyIcon($small[0]) }
+
+function Convert-IconToBase64Png([System.Drawing.Icon]$icon) {
+  $bitmap = $null
+  $stream = $null
+  try {
+    $bitmap = $icon.ToBitmap()
+    $stream = New-Object IO.MemoryStream
+    $bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
+    return [Convert]::ToBase64String($stream.ToArray())
+  } finally {
+    if ($null -ne $stream) { $stream.Dispose() }
+    if ($null -ne $bitmap) { $bitmap.Dispose() }
+  }
+}
+
+function Read-IconFromFile([string]$source, [int]$index) {
+  $icon = $null
+  $large = $null
+  $small = $null
+  $handle = [IntPtr]::Zero
+  try {
+    if ([IO.Path]::GetExtension($source).ToLowerInvariant() -eq '.ico') {
+      return New-Object System.Drawing.Icon -ArgumentList $source
     }
-    if ($null -eq $icon) {
-      $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($source)
+
+    foreach ($candidateIndex in @($index, 0)) {
+      $large = New-Object IntPtr[] 1
+      $small = New-Object IntPtr[] 1
+      [void][DeskShortcutIconExtractor]::ExtractIconEx($source, $candidateIndex, $large, $small, 1)
+      $handle = if ($large[0] -ne [IntPtr]::Zero) { $large[0] } else { $small[0] }
+      if ($handle -ne [IntPtr]::Zero) {
+        $icon = [System.Drawing.Icon]::FromHandle($handle).Clone()
+        [void][DeskShortcutIconExtractor]::DestroyIcon($handle)
+        if ($large[0] -ne [IntPtr]::Zero -and $large[0] -ne $handle) { [void][DeskShortcutIconExtractor]::DestroyIcon($large[0]) }
+        if ($small[0] -ne [IntPtr]::Zero -and $small[0] -ne $handle) { [void][DeskShortcutIconExtractor]::DestroyIcon($small[0]) }
+        return $icon
+      }
+    }
+
+    return [System.Drawing.Icon]::ExtractAssociatedIcon($source)
+  } finally {
+    if ($handle -eq [IntPtr]::Zero) {
+      if ($large -and $large[0] -ne [IntPtr]::Zero) { [void][DeskShortcutIconExtractor]::DestroyIcon($large[0]) }
+      if ($small -and $small[0] -ne [IntPtr]::Zero) { [void][DeskShortcutIconExtractor]::DestroyIcon($small[0]) }
     }
   }
-  if ($null -eq $icon) { exit 3 }
-  $bitmap = $icon.ToBitmap()
-  $stream = New-Object IO.MemoryStream
-  $bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
-  [Convert]::ToBase64String($stream.ToArray())
-} finally {
-  if ($null -ne $stream) { $stream.Dispose() }
-  if ($null -ne $bitmap) { $bitmap.Dispose() }
-  if ($null -ne $icon) { $icon.Dispose() }
 }
+
+$iconPath = Resolve-ExistingPath $args[0]
+$targetPath = Resolve-ExistingPath $args[1]
+$iconIndex = [int]$args[2]
+
+$candidates = @()
+if ($null -ne $iconPath) {
+  $candidates += @{ Source = $iconPath; Index = $iconIndex }
+}
+if ($null -ne $targetPath -and $targetPath -ne $iconPath) {
+  $candidates += @{ Source = $targetPath; Index = 0 }
+}
+if ($candidates.Count -eq 0) { exit 2 }
+
+foreach ($candidate in $candidates) {
+  $icon = $null
+  try {
+    $icon = Read-IconFromFile $candidate['Source'] $candidate['Index']
+    if ($null -ne $icon) {
+      Convert-IconToBase64Png $icon
+      exit 0
+    }
+  } catch {
+  } finally {
+    if ($null -ne $icon) { $icon.Dispose() }
+  }
+}
+exit 3
 "#;
 
         let output = Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])
+            .creation_flags(CREATE_NO_WINDOW)
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-WindowStyle",
+                "Hidden",
+                "-Command",
+                script,
+            ])
             .arg(icon_path)
             .arg(target_path)
             .arg(icon_index.to_string())
@@ -774,7 +834,8 @@ try {
 
     pub fn open_target_folder(target_path: &str) -> Result<(), String> {
         let argument = format!("/select,\"{target_path}\"");
-        std::process::Command::new("explorer.exe")
+        Command::new("explorer.exe")
+            .creation_flags(CREATE_NO_WINDOW)
             .arg(argument)
             .spawn()
             .map_err(|error| format!("打开目标所在位置失败：{error}"))?;
@@ -785,14 +846,16 @@ try {
         let exe = std::env::current_exe().map_err(|error| format!("读取当前程序路径失败：{error}"))?;
         let run_key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
         let status = if enabled {
-            std::process::Command::new("reg.exe")
+            Command::new("reg.exe")
+                .creation_flags(CREATE_NO_WINDOW)
                 .args(["add", run_key, "/v", "DeskShortcut", "/t", "REG_SZ", "/d"])
                 .arg(exe)
                 .arg("/f")
                 .status()
                 .map_err(|error| format!("设置开机自启动失败：{error}"))?
         } else {
-            std::process::Command::new("reg.exe")
+            Command::new("reg.exe")
+                .creation_flags(CREATE_NO_WINDOW)
                 .args(["delete", run_key, "/v", "DeskShortcut", "/f"])
                 .status()
                 .map_err(|error| format!("关闭开机自启动失败：{error}"))?
