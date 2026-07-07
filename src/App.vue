@@ -3,7 +3,7 @@
     class="shell"
     :class="{ 'is-drag-over': isDragOver }"
     @mouseenter="showDockedWindow"
-    @mouseleave="queueHideDockedWindow"
+    @mouseleave="hideDockedWindowNow"
   >
     <header class="titlebar" data-tauri-drag-region @mousedown="startWindowDrag">
       <div class="brand" data-tauri-drag-region>
@@ -21,62 +21,69 @@
       </div>
     </header>
 
-    <nav v-if="state.settings.showGroupBar" class="groupbar">
-      <button
-        class="group-tab"
-        :class="{ active: activeGroupId === 'all' }"
-        @click="activeGroupId = 'all'"
-        @contextmenu.prevent="openGroupMenu($event, null)"
-      >
-        全部
-      </button>
-      <button
-        v-for="group in sortedGroups"
-        :key="group.id"
-        class="group-tab"
-        :class="{ active: activeGroupId === group.id }"
-        @click="activeGroupId = group.id"
-        @contextmenu.prevent="openGroupMenu($event, group)"
-      >
-        {{ group.name }}
-      </button>
-      <button class="group-add" title="新建分组" @click="createGroup">+</button>
-    </nav>
-
-    <section class="content">
-      <div v-if="visibleShortcuts.length === 0" class="empty">
-        <div class="drop-symbol">↧</div>
-        <h1>将桌面快捷方式拖到这里</h1>
-        <p>导入后可选择自动删除桌面图标。以后你可以直接从 DeskShortcut 启动软件。</p>
-        <button class="primary" @click="promptShortcutPath">添加快捷方式</button>
-      </div>
-
-      <div v-else class="shortcut-grid">
+    <div class="workspace" :class="{ 'without-groups': !state.settings.showGroupBar }">
+      <nav v-if="state.settings.showGroupBar" class="groupbar">
         <button
-          v-for="shortcut in visibleShortcuts"
-          :key="shortcut.id"
-          class="shortcut-tile"
-          :title="shortcut.targetPath"
-          @click="launch(shortcut)"
-          @contextmenu.prevent="openShortcutMenu($event, shortcut)"
+          class="group-tab"
+          :class="{ active: activeGroupId === 'all' }"
+          @click="activeGroupId = 'all'"
+          @contextmenu.prevent="openGroupMenu($event, null)"
         >
-          <span class="tile-icon">{{ iconText(shortcut) }}</span>
-          <span class="tile-name">{{ shortcut.name }}</span>
-          <span v-if="shortcut.isFavorite" class="favorite-dot" title="常用">★</span>
+          全部
         </button>
-      </div>
-    </section>
+        <button
+          v-for="group in sortedGroups"
+          :key="group.id"
+          class="group-tab"
+          :class="{ active: activeGroupId === group.id }"
+          @click="activeGroupId = group.id"
+          @contextmenu.prevent="openGroupMenu($event, group)"
+        >
+          {{ group.name }}
+        </button>
+        <button class="group-add" title="新建分组" @click="createGroup">+</button>
+      </nav>
+
+      <section class="content">
+        <div v-if="visibleShortcuts.length === 0" class="empty">
+          <div class="drop-symbol">↧</div>
+          <h1>将桌面快捷方式拖到这里</h1>
+          <p>导入后可选择自动删除桌面图标。以后你可以直接从 DeskShortcut 启动软件。</p>
+          <button class="primary" @click="promptShortcutPath">添加快捷方式</button>
+        </div>
+
+        <div v-else class="shortcut-grid">
+          <button
+            v-for="shortcut in visibleShortcuts"
+            :key="shortcut.id"
+            class="shortcut-tile"
+            :title="shortcut.targetPath"
+            @click="launch(shortcut)"
+            @contextmenu.prevent="openShortcutMenu($event, shortcut)"
+          >
+            <span class="tile-icon" :class="{ 'has-image': Boolean(shortcut.iconDataUrl) }">
+              <img v-if="shortcut.iconDataUrl" :src="shortcut.iconDataUrl" alt="" />
+              <template v-else>{{ iconText(shortcut) }}</template>
+            </span>
+            <span class="tile-name">{{ shortcut.name }}</span>
+            <span v-if="shortcut.isFavorite" class="favorite-dot" title="常用">★</span>
+          </button>
+        </div>
+      </section>
+    </div>
 
     <footer class="toolbar">
       <button class="tool-button" @click="promptShortcutPath">+ 添加快捷方式</button>
-      <button class="tool-button" @click="togglePinned">{{ state.settings.isPinned ? '已固定' : '自动隐藏' }}</button>
       <button class="tool-button" @click="settingsOpen = true">设置</button>
     </footer>
 
     <div v-if="pendingImport" class="modal-backdrop" @click.self="pendingImport = null">
       <form class="modal" @submit.prevent="confirmImport">
         <header class="modal-header">
-          <span class="modal-icon">{{ pendingImport.name.slice(0, 1).toUpperCase() }}</span>
+          <span class="modal-icon" :class="{ 'has-image': Boolean(pendingImport.iconDataUrl) }">
+            <img v-if="pendingImport.iconDataUrl" :src="pendingImport.iconDataUrl" alt="" />
+            <template v-else>{{ pendingImport.name.slice(0, 1).toUpperCase() }}</template>
+          </span>
           <div>
             <h2>确认导入</h2>
             <p>DeskShortcut 只会删除桌面快捷方式，不会删除软件本体。</p>
@@ -118,7 +125,10 @@
     <div v-if="editingShortcut" class="modal-backdrop" @click.self="editingShortcut = null">
       <form class="modal" @submit.prevent="saveShortcutEdit">
         <header class="modal-header">
-          <span class="modal-icon">{{ editingShortcut.name.slice(0, 1).toUpperCase() }}</span>
+          <span class="modal-icon" :class="{ 'has-image': Boolean(editingShortcut.iconDataUrl) }">
+            <img v-if="editingShortcut.iconDataUrl" :src="editingShortcut.iconDataUrl" alt="" />
+            <template v-else>{{ editingShortcut.name.slice(0, 1).toUpperCase() }}</template>
+          </span>
           <div>
             <h2>编辑快捷方式</h2>
             <p>{{ editingShortcut.originalShortcutPath }}</p>
@@ -175,7 +185,7 @@
         <label class="check-row"><input v-model="state.settings.alwaysOnTop" type="checkbox" /> 窗口置顶</label>
         <label class="check-row"><input v-model="state.settings.launchAtStartup" type="checkbox" /> 开机自启动</label>
         <label class="check-row"><input v-model="state.settings.hideAfterLaunch" type="checkbox" /> 启动软件后隐藏窗口</label>
-        <label class="check-row"><input v-model="state.settings.showGroupBar" type="checkbox" /> 显示分组栏</label>
+        <label class="check-row"><input v-model="state.settings.showGroupBar" type="checkbox" /> 显示左侧分组栏</label>
         <div class="data-actions">
           <button type="button" @click="exportConfig">导出配置</button>
           <button type="button" @click="triggerImportConfig">导入配置</button>
@@ -234,6 +244,7 @@ type ShortcutInfo = {
   workingDirectory: string;
   iconPath: string;
   iconIndex: number;
+  iconDataUrl: string;
   description: string;
   hotkey: string;
   showCommand: string;
@@ -307,7 +318,6 @@ const isDragOver = ref(false);
 const configInput = ref<HTMLInputElement | null>(null);
 const dataLocationText = '本地数据保存在应用数据目录的 deskshortcut.json';
 let toastTimer = 0;
-let hideTimer = 0;
 let snapTimer = 0;
 let revealTimer = 0;
 let revealInFlight = false;
@@ -340,6 +350,7 @@ const visibleShortcuts = computed(() => {
 
 onMounted(async () => {
   await loadState();
+  void hydrateMissingShortcutIcons();
   await invoke('set_window_always_on_top', { enabled: state.settings.alwaysOnTop });
   window.addEventListener('click', closeContextMenu);
   window.addEventListener('keydown', handleKeydown);
@@ -368,7 +379,6 @@ onBeforeUnmount(() => {
   window.removeEventListener('click', closeContextMenu);
   window.removeEventListener('keydown', handleKeydown);
   window.clearTimeout(toastTimer);
-  window.clearTimeout(hideTimer);
   window.clearInterval(snapTimer);
   window.clearInterval(revealTimer);
   dragUnlisten?.();
@@ -376,7 +386,7 @@ onBeforeUnmount(() => {
 
 async function loadState() {
   const data = await invoke<AppStateData>('get_app_state');
-  state.shortcuts = data.shortcuts;
+  state.shortcuts = normalizeShortcuts(data.shortcuts);
   state.groups = normalizeGroups(data.groups);
   state.settings = data.settings;
   deleteAfterImport.value = state.settings.autoDeleteDesktopShortcut;
@@ -391,6 +401,13 @@ function normalizeGroups(groups: GroupRecord[]) {
   if (!next.some((group) => group.id === commonId)) next.push(newGroup('常用', commonId, 10));
   if (!next.some((group) => group.id === ungroupedId)) next.push(newGroup('未分组', ungroupedId, 20));
   return next;
+}
+
+function normalizeShortcuts(shortcuts: ShortcutRecord[]) {
+  return shortcuts.map((shortcut) => ({
+    ...shortcut,
+    iconDataUrl: (shortcut as Partial<ShortcutRecord>).iconDataUrl ?? ''
+  }));
 }
 
 async function handleDroppedPaths(paths: string[]) {
@@ -449,6 +466,7 @@ async function confirmImport() {
     workingDirectory: importData.workingDirectory,
     iconPath: importData.iconPath,
     iconIndex: importData.iconIndex,
+    iconDataUrl: importData.iconDataUrl,
     description: importData.description,
     hotkey: importData.hotkey,
     showCommand: importData.showCommand,
@@ -503,10 +521,15 @@ async function saveShortcutEdit() {
   if (!editingShortcut.value) return;
   const index = state.shortcuts.findIndex((shortcut) => shortcut.id === editingShortcut.value?.id);
   if (index >= 0) {
+    const current = state.shortcuts[index];
+    const iconSourceChanged =
+      current.iconPath !== editingShortcut.value.iconPath || current.targetPath !== editingShortcut.value.targetPath;
     state.shortcuts[index] = {
       ...editingShortcut.value,
+      iconDataUrl: iconSourceChanged ? '' : editingShortcut.value.iconDataUrl,
       updatedAt: new Date().toISOString()
     };
+    if (iconSourceChanged) await refreshShortcutIcon(state.shortcuts[index]);
     await saveState();
     notify('已保存');
   }
@@ -696,9 +719,10 @@ async function importConfig(event: Event) {
   try {
     const content = await file.text();
     const imported = JSON.parse(content) as AppStateData;
-    state.shortcuts = imported.shortcuts ?? [];
+    state.shortcuts = normalizeShortcuts(imported.shortcuts ?? []);
     state.groups = normalizeGroups(imported.groups ?? []);
     state.settings = { ...state.settings, ...imported.settings };
+    await hydrateMissingShortcutIcons();
     await saveState();
     notify('配置已导入');
   } catch (error) {
@@ -764,12 +788,38 @@ async function checkDockSnap() {
 }
 
 async function showDockedWindow() {
-  window.clearTimeout(hideTimer);
   if (!canAutoHide()) return;
   try {
     await invoke('show_docked_window', { position: state.settings.dockPosition });
   } catch {
     // Ignore window positioning failures here; the next snap check can recover.
+  }
+}
+
+async function hydrateMissingShortcutIcons() {
+  const missing = state.shortcuts.filter((shortcut) => !shortcut.iconDataUrl && (shortcut.iconPath || shortcut.targetPath));
+  if (!missing.length) return;
+
+  let changed = false;
+  for (const shortcut of missing) {
+    changed = (await refreshShortcutIcon(shortcut)) || changed;
+  }
+  if (changed) await saveState();
+}
+
+async function refreshShortcutIcon(shortcut: ShortcutRecord) {
+  try {
+    const iconDataUrl = await invoke<string>('extract_icon_data', {
+      iconPath: shortcut.iconPath,
+      targetPath: shortcut.targetPath,
+      iconIndex: shortcut.iconIndex
+    });
+    if (!iconDataUrl) return false;
+    shortcut.iconDataUrl = iconDataUrl;
+    shortcut.updatedAt = new Date().toISOString();
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -845,12 +895,6 @@ function isPointerInDockTrigger(
   }
 
   return false;
-}
-
-function queueHideDockedWindow() {
-  window.clearTimeout(hideTimer);
-  if (!canAutoHide()) return;
-  hideTimer = window.setTimeout(hideDockedWindowNow, 750);
 }
 
 async function hideDockedWindowNow() {

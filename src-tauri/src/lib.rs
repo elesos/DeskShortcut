@@ -23,6 +23,8 @@ pub struct ShortcutRecord {
     pub working_directory: String,
     pub icon_path: String,
     pub icon_index: i32,
+    #[serde(default)]
+    pub icon_data_url: String,
     pub group_id: String,
     pub is_favorite: bool,
     pub sort_order: i32,
@@ -44,6 +46,8 @@ pub struct ShortcutInfo {
     pub working_directory: String,
     pub icon_path: String,
     pub icon_index: i32,
+    #[serde(default)]
+    pub icon_data_url: String,
     pub description: String,
     pub hotkey: String,
     pub show_command: String,
@@ -113,6 +117,7 @@ pub fn run() {
             get_app_state,
             save_app_state,
             parse_shortcut,
+            extract_icon_data,
             delete_shortcut_file,
             launch_shortcut,
             open_target_folder,
@@ -192,6 +197,11 @@ fn save_app_state(app: AppHandle, state: AppStateData) -> Result<(), String> {
 fn parse_shortcut(path: String) -> Result<ShortcutInfo, String> {
     validate_lnk_path(&path)?;
     platform::parse_shortcut(Path::new(&path))
+}
+
+#[tauri::command]
+fn extract_icon_data(icon_path: String, target_path: String, icon_index: i32) -> Result<String, String> {
+    platform::extract_icon_data(&icon_path, &target_path, icon_index)
 }
 
 #[tauri::command]
@@ -363,12 +373,14 @@ fn snap_window_if_near_edge(app: AppHandle) -> Result<DockResult, String> {
 
 #[tauri::command]
 fn hide_docked_window(app: AppHandle, position: String) -> Result<(), String> {
-    move_docked_window(app, &position, true)
+    move_docked_window(app.clone(), &position, true)?;
+    restore_configured_always_on_top(&app)
 }
 
 #[tauri::command]
 fn show_docked_window(app: AppHandle, position: String) -> Result<(), String> {
-    move_docked_window(app, &position, false)
+    move_docked_window(app.clone(), &position, false)?;
+    raise_window_for_dock_reveal(&app)
 }
 
 fn move_docked_window(app: AppHandle, position: &str, hide: bool) -> Result<(), String> {
@@ -408,6 +420,33 @@ fn move_docked_window(app: AppHandle, position: &str, hide: bool) -> Result<(), 
     window
         .set_position(next)
         .map_err(|error| format!("移动窗口失败：{error}"))
+}
+
+fn raise_window_for_dock_reveal(app: &AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "主窗口不存在".to_string())?;
+    window
+        .unminimize()
+        .map_err(|error| format!("恢复窗口失败：{error}"))?;
+    window
+        .show()
+        .map_err(|error| format!("显示窗口失败：{error}"))?;
+    window
+        .set_always_on_top(true)
+        .map_err(|error| format!("提升窗口失败：{error}"))?;
+    let _ = window.set_focus();
+    Ok(())
+}
+
+fn restore_configured_always_on_top(app: &AppHandle) -> Result<(), String> {
+    let state = get_app_state(app.clone())?;
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "主窗口不存在".to_string())?;
+    window
+        .set_always_on_top(state.settings.always_on_top)
+        .map_err(|error| format!("恢复置顶设置失败：{error}"))
 }
 
 fn show_window(app: &AppHandle) -> Result<(), String> {
@@ -507,7 +546,7 @@ fn new_id(prefix: &str) -> String {
 #[cfg(windows)]
 mod platform {
     use super::{LaunchResult, ShortcutInfo, ShortcutRecord};
-    use std::{ffi::OsStr, os::windows::ffi::OsStrExt, path::Path, ptr};
+    use std::{ffi::OsStr, os::windows::ffi::OsStrExt, path::Path, process::Command, ptr};
     use windows::{
         core::{Interface, PCWSTR},
         Win32::{
@@ -582,13 +621,19 @@ mod platform {
             }
         }
 
-        let target_path = from_wide(&target);
         let icon = from_wide(&icon_path);
+        let target_path = from_wide(&target);
+        let resolved_icon_path = if icon.is_empty() {
+            target_path.clone()
+        } else {
+            icon
+        };
         let name = path
             .file_stem()
             .and_then(|name| name.to_str())
             .unwrap_or("未命名快捷方式")
             .to_string();
+        let icon_data_url = extract_icon_data(&resolved_icon_path, &target_path, icon_index).unwrap_or_default();
 
         Ok(ShortcutInfo {
             name,
@@ -596,16 +641,90 @@ mod platform {
             target_path,
             arguments: from_wide(&arguments),
             working_directory: from_wide(&working_directory),
-            icon_path: if icon.is_empty() {
-                from_wide(&target)
-            } else {
-                icon
-            },
+            icon_path: resolved_icon_path,
             icon_index,
+            icon_data_url,
             description: from_wide(&description),
             hotkey: hotkey_to_string(hotkey),
             show_command: show_command_to_string(show_command),
         })
+    }
+
+    pub fn extract_icon_data(icon_path: &str, target_path: &str, icon_index: i32) -> Result<String, String> {
+        let script = r#"
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Drawing
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class DeskShortcutIconExtractor {
+  [DllImport("Shell32.dll", CharSet = CharSet.Unicode)]
+  public static extern uint ExtractIconEx(string file, int index, IntPtr[] large, IntPtr[] small, uint count);
+  [DllImport("User32.dll")]
+  public static extern bool DestroyIcon(IntPtr handle);
+}
+'@
+$iconPath = [Environment]::ExpandEnvironmentVariables($args[0])
+$targetPath = [Environment]::ExpandEnvironmentVariables($args[1])
+$iconIndex = [int]$args[2]
+$source = $null
+if (![string]::IsNullOrWhiteSpace($iconPath) -and (Test-Path -LiteralPath $iconPath)) {
+  $source = $iconPath
+} elseif (![string]::IsNullOrWhiteSpace($targetPath) -and (Test-Path -LiteralPath $targetPath)) {
+  $source = $targetPath
+}
+if ($null -eq $source) { exit 2 }
+$icon = $null
+$bitmap = $null
+$stream = $null
+try {
+  if ([IO.Path]::GetExtension($source).ToLowerInvariant() -eq '.ico') {
+    $icon = New-Object System.Drawing.Icon($source)
+  } else {
+    $large = New-Object IntPtr[] 1
+    $small = New-Object IntPtr[] 1
+    [void][DeskShortcutIconExtractor]::ExtractIconEx($source, $iconIndex, $large, $small, 1)
+    $handle = if ($large[0] -ne [IntPtr]::Zero) { $large[0] } else { $small[0] }
+    if ($handle -ne [IntPtr]::Zero) {
+      $icon = [System.Drawing.Icon]::FromHandle($handle).Clone()
+      [void][DeskShortcutIconExtractor]::DestroyIcon($handle)
+      if ($large[0] -ne [IntPtr]::Zero -and $large[0] -ne $handle) { [void][DeskShortcutIconExtractor]::DestroyIcon($large[0]) }
+      if ($small[0] -ne [IntPtr]::Zero -and $small[0] -ne $handle) { [void][DeskShortcutIconExtractor]::DestroyIcon($small[0]) }
+    }
+    if ($null -eq $icon) {
+      $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($source)
+    }
+  }
+  if ($null -eq $icon) { exit 3 }
+  $bitmap = $icon.ToBitmap()
+  $stream = New-Object IO.MemoryStream
+  $bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
+  [Convert]::ToBase64String($stream.ToArray())
+} finally {
+  if ($null -ne $stream) { $stream.Dispose() }
+  if ($null -ne $bitmap) { $bitmap.Dispose() }
+  if ($null -ne $icon) { $icon.Dispose() }
+}
+"#;
+
+        let output = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])
+            .arg(icon_path)
+            .arg(target_path)
+            .arg(icon_index.to_string())
+            .output()
+            .map_err(|error| format!("提取图标失败：{error}"))?;
+
+        if !output.status.success() {
+            return Err("提取图标失败，可能是图标资源不存在或不可读取".to_string());
+        }
+
+        let base64 = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if base64.is_empty() {
+            Err("提取图标失败，未读取到图标数据".to_string())
+        } else {
+            Ok(format!("data:image/png;base64,{base64}"))
+        }
     }
 
     pub fn launch_shortcut(shortcut: &ShortcutRecord) -> Result<LaunchResult, String> {
@@ -725,6 +844,10 @@ mod platform {
 
     pub fn parse_shortcut(_path: &Path) -> Result<ShortcutInfo, String> {
         Err("DeskShortcut 只能在 Windows 上解析 .lnk 快捷方式".to_string())
+    }
+
+    pub fn extract_icon_data(_icon_path: &str, _target_path: &str, _icon_index: i32) -> Result<String, String> {
+        Err("DeskShortcut 只能在 Windows 上提取快捷方式图标".to_string())
     }
 
     pub fn launch_shortcut(_shortcut: &ShortcutRecord) -> Result<LaunchResult, String> {

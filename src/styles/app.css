@@ -43,7 +43,7 @@ button:disabled {
 
 .shell {
   display: grid;
-  grid-template-rows: 44px auto 1fr 42px;
+  grid-template-rows: 44px 1fr 42px;
   width: 100%;
   height: 100%;
   overflow: hidden;
@@ -110,14 +110,26 @@ button:disabled {
   background: #b42318;
 }
 
+.workspace {
+  display: grid;
+  grid-template-columns: 118px minmax(0, 1fr);
+  min-height: 0;
+}
+
+.workspace.without-groups {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .groupbar {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   gap: 6px;
-  min-height: 42px;
-  padding: 7px 10px;
-  overflow-x: auto;
-  border-bottom: 1px solid #ddd6c9;
+  min-width: 0;
+  min-height: 0;
+  padding: 10px 8px;
+  overflow: auto;
+  border-right: 1px solid #ddd6c9;
   background: #efe9dc;
 }
 
@@ -135,10 +147,10 @@ button:disabled {
 }
 
 .group-tab {
-  flex: 0 0 auto;
-  max-width: 120px;
+  width: 100%;
   padding: 0 12px;
   overflow: hidden;
+  text-align: left;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
@@ -150,13 +162,14 @@ button:disabled {
 }
 
 .group-add {
-  flex: 0 0 auto;
-  width: 30px;
+  width: 100%;
   font-size: 18px;
 }
 
 .content {
   position: relative;
+  min-width: 0;
+  min-height: 0;
   overflow: auto;
   padding: 14px;
 }
@@ -232,6 +245,17 @@ button:disabled {
   color: #ffffff;
   background: linear-gradient(135deg, #2f7d80 0%, #606b3d 100%);
   font-weight: 800;
+}
+
+.tile-icon.has-image {
+  color: inherit;
+  background: transparent;
+}
+
+.tile-icon img {
+  max-width: 44px;
+  max-height: 44px;
+  object-fit: contain;
 }
 
 .tile-name {
@@ -321,6 +345,16 @@ button:disabled {
   color: #ffffff;
   background: #606b3d;
   font-weight: 800;
+}
+
+.modal-icon.has-image {
+  background: transparent;
+}
+
+.modal-icon img {
+  max-width: 40px;
+  max-height: 40px;
+  object-fit: contain;
 }
 
 .modal h2 {
