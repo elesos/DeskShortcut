@@ -546,8 +546,11 @@ fn new_id(prefix: &str) -> String {
 #[cfg(windows)]
 mod platform {
     use super::{LaunchResult, ShortcutInfo, ShortcutRecord};
+    use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+    use image::{codecs::png::PngEncoder, ColorType, ImageEncoder};
     use std::{
-        ffi::OsStr,
+        ffi::{c_void, OsStr},
+        mem,
         os::windows::{ffi::OsStrExt, process::CommandExt},
         path::Path,
         process::Command,
@@ -556,14 +559,25 @@ mod platform {
     use windows::{
         core::{Interface, PCWSTR},
         Win32::{
-            Foundation::MAX_PATH,
+            Foundation::{HANDLE, MAX_PATH},
+            Graphics::Gdi::{
+                CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetObjectW,
+                SelectObject, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HBRUSH, HDC,
+                HGDIOBJ,
+            },
+            Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES,
             System::Com::{
-                CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, CLSCTX_INPROC_SERVER,
-                COINIT_APARTMENTTHREADED, STGM_READ,
+                CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile,
+                CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, STGM_READ,
             },
             UI::{
-                Shell::{IShellLinkW, ShellExecuteW, ShellLink, SLGP_RAWPATH},
-                WindowsAndMessaging::SW_SHOWNORMAL,
+                Shell::{
+                    ExtractIconExW, IShellLinkW, SHGetFileInfoW, ShellExecuteW, ShellLink,
+                    SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGFI_SMALLICON, SLGP_RAWPATH,
+                },
+                WindowsAndMessaging::{
+                    DestroyIcon, DrawIconEx, GetIconInfo, DI_NORMAL, HICON, SW_SHOWNORMAL,
+                },
             },
         },
     };
@@ -641,7 +655,8 @@ mod platform {
             .and_then(|name| name.to_str())
             .unwrap_or("未命名快捷方式")
             .to_string();
-        let icon_data_url = extract_icon_data(&resolved_icon_path, &target_path, icon_index).unwrap_or_default();
+        let icon_data_url =
+            extract_icon_data(&resolved_icon_path, &target_path, icon_index).unwrap_or_default();
 
         Ok(ShortcutInfo {
             name,
@@ -658,132 +673,352 @@ mod platform {
         })
     }
 
-    pub fn extract_icon_data(icon_path: &str, target_path: &str, icon_index: i32) -> Result<String, String> {
-        let script = r#"
-$ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName System.Drawing
-Add-Type @'
-using System;
-using System.Runtime.InteropServices;
-public static class DeskShortcutIconExtractor {
-  [DllImport("Shell32.dll", CharSet = CharSet.Unicode)]
-  public static extern uint ExtractIconEx(string file, int index, IntPtr[] large, IntPtr[] small, uint count);
-  [DllImport("User32.dll")]
-  public static extern bool DestroyIcon(IntPtr handle);
-}
-'@
-
-function Resolve-ExistingPath([string]$path) {
-  if ([string]::IsNullOrWhiteSpace($path)) { return $null }
-  $expanded = [Environment]::ExpandEnvironmentVariables($path)
-  if (Test-Path -LiteralPath $expanded -PathType Leaf) { return $expanded }
-  return $null
-}
-
-function Convert-IconToBase64Png([System.Drawing.Icon]$icon) {
-  $bitmap = $null
-  $stream = $null
-  try {
-    $bitmap = $icon.ToBitmap()
-    $stream = New-Object IO.MemoryStream
-    $bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
-    return [Convert]::ToBase64String($stream.ToArray())
-  } finally {
-    if ($null -ne $stream) { $stream.Dispose() }
-    if ($null -ne $bitmap) { $bitmap.Dispose() }
-  }
-}
-
-function Read-IconFromFile([string]$source, [int]$index) {
-  $icon = $null
-  $large = $null
-  $small = $null
-  $handle = [IntPtr]::Zero
-  try {
-    if ([IO.Path]::GetExtension($source).ToLowerInvariant() -eq '.ico') {
-      return New-Object System.Drawing.Icon -ArgumentList $source
-    }
-
-    foreach ($candidateIndex in @($index, 0)) {
-      $large = New-Object IntPtr[] 1
-      $small = New-Object IntPtr[] 1
-      [void][DeskShortcutIconExtractor]::ExtractIconEx($source, $candidateIndex, $large, $small, 1)
-      $handle = if ($large[0] -ne [IntPtr]::Zero) { $large[0] } else { $small[0] }
-      if ($handle -ne [IntPtr]::Zero) {
-        $icon = [System.Drawing.Icon]::FromHandle($handle).Clone()
-        [void][DeskShortcutIconExtractor]::DestroyIcon($handle)
-        if ($large[0] -ne [IntPtr]::Zero -and $large[0] -ne $handle) { [void][DeskShortcutIconExtractor]::DestroyIcon($large[0]) }
-        if ($small[0] -ne [IntPtr]::Zero -and $small[0] -ne $handle) { [void][DeskShortcutIconExtractor]::DestroyIcon($small[0]) }
-        return $icon
-      }
-    }
-
-    return [System.Drawing.Icon]::ExtractAssociatedIcon($source)
-  } finally {
-    if ($handle -eq [IntPtr]::Zero) {
-      if ($large -and $large[0] -ne [IntPtr]::Zero) { [void][DeskShortcutIconExtractor]::DestroyIcon($large[0]) }
-      if ($small -and $small[0] -ne [IntPtr]::Zero) { [void][DeskShortcutIconExtractor]::DestroyIcon($small[0]) }
-    }
-  }
-}
-
-$iconPath = Resolve-ExistingPath $args[0]
-$targetPath = Resolve-ExistingPath $args[1]
-$iconIndex = [int]$args[2]
-
-$candidates = @()
-if ($null -ne $iconPath) {
-  $candidates += @{ Source = $iconPath; Index = $iconIndex }
-}
-if ($null -ne $targetPath -and $targetPath -ne $iconPath) {
-  $candidates += @{ Source = $targetPath; Index = 0 }
-}
-if ($candidates.Count -eq 0) { exit 2 }
-
-foreach ($candidate in $candidates) {
-  $icon = $null
-  try {
-    $icon = Read-IconFromFile $candidate['Source'] $candidate['Index']
-    if ($null -ne $icon) {
-      Convert-IconToBase64Png $icon
-      exit 0
-    }
-  } catch {
-  } finally {
-    if ($null -ne $icon) { $icon.Dispose() }
-  }
-}
-exit 3
-"#;
-
-        let output = Command::new("powershell.exe")
-            .creation_flags(CREATE_NO_WINDOW)
-            .args([
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-WindowStyle",
-                "Hidden",
-                "-Command",
-                script,
-            ])
-            .arg(icon_path)
-            .arg(target_path)
-            .arg(icon_index.to_string())
-            .output()
-            .map_err(|error| format!("提取图标失败：{error}"))?;
-
-        if !output.status.success() {
-            return Err("提取图标失败，可能是图标资源不存在或不可读取".to_string());
+    pub fn extract_icon_data(
+        icon_path: &str,
+        target_path: &str,
+        icon_index: i32,
+    ) -> Result<String, String> {
+        for (source, index) in icon_candidates(icon_path, target_path, icon_index) {
+            if let Ok(icon) =
+                extract_resource_icon(&source, index).or_else(|_| shell_file_icon(&source, true))
+            {
+                if let Ok(data_url) = hicon_to_png_data_url(icon.0) {
+                    return Ok(data_url);
+                }
+            }
+            if let Ok(icon) = shell_file_icon(&source, false) {
+                if let Ok(data_url) = hicon_to_png_data_url(icon.0) {
+                    return Ok(data_url);
+                }
+            }
         }
 
-        let base64 = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if base64.is_empty() {
-            Err("提取图标失败，未读取到图标数据".to_string())
+        Err("提取图标失败，可能是图标资源不存在或不可读取".to_string())
+    }
+
+    struct OwnedIcon(HICON);
+
+    impl Drop for OwnedIcon {
+        fn drop(&mut self) {
+            if !self.0.is_invalid() {
+                unsafe {
+                    let _ = DestroyIcon(self.0);
+                }
+            }
+        }
+    }
+
+    fn icon_candidates(icon_path: &str, target_path: &str, icon_index: i32) -> Vec<(String, i32)> {
+        let mut candidates = Vec::new();
+        push_icon_candidate(&mut candidates, icon_path, icon_index);
+        push_icon_candidate(&mut candidates, target_path, 0);
+        candidates
+    }
+
+    fn push_icon_candidate(candidates: &mut Vec<(String, i32)>, value: &str, fallback_index: i32) {
+        if let Some((path, index)) = normalize_icon_source(value, fallback_index) {
+            if !candidates.iter().any(|(existing, existing_index)| {
+                existing.eq_ignore_ascii_case(&path) && *existing_index == index
+            }) {
+                candidates.push((path, index));
+            }
+        }
+    }
+
+    fn normalize_icon_source(value: &str, fallback_index: i32) -> Option<(String, i32)> {
+        let trimmed = value.trim().trim_matches('"');
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        let expanded = expand_windows_env_vars(trimmed);
+        let path = Path::new(&expanded);
+        if path.is_file() {
+            return Some((expanded, fallback_index));
+        }
+
+        if let Some((path_part, parsed_index)) = split_icon_location(&expanded) {
+            if Path::new(&path_part).is_file() {
+                return Some((path_part, parsed_index));
+            }
+        }
+
+        None
+    }
+
+    fn split_icon_location(value: &str) -> Option<(String, i32)> {
+        let (path, index) = value.rsplit_once(',')?;
+        let parsed_index = index.trim().parse::<i32>().ok()?;
+        let clean_path = path.trim().trim_matches('"').to_string();
+        if clean_path.is_empty() {
+            None
         } else {
-            Ok(format!("data:image/png;base64,{base64}"))
+            Some((clean_path, parsed_index))
+        }
+    }
+
+    fn expand_windows_env_vars(value: &str) -> String {
+        let mut output = String::with_capacity(value.len());
+        let mut rest = value;
+
+        while let Some(start) = rest.find('%') {
+            output.push_str(&rest[..start]);
+            let after_start = &rest[start + 1..];
+            if let Some(end) = after_start.find('%') {
+                let name = &after_start[..end];
+                if name.is_empty() {
+                    output.push_str("%%");
+                } else if let Ok(replacement) = std::env::var(name) {
+                    output.push_str(&replacement);
+                } else {
+                    output.push('%');
+                    output.push_str(name);
+                    output.push('%');
+                }
+                rest = &after_start[end + 1..];
+            } else {
+                output.push('%');
+                rest = after_start;
+            }
+        }
+
+        output.push_str(rest);
+        output
+    }
+
+    fn extract_resource_icon(source: &str, index: i32) -> Result<OwnedIcon, String> {
+        let source_wide = wide_null(source);
+        let mut large = [HICON::default(); 1];
+        let mut small = [HICON::default(); 1];
+
+        let extracted = unsafe {
+            ExtractIconExW(
+                PCWSTR(source_wide.as_ptr()),
+                index,
+                Some(large.as_mut_ptr()),
+                Some(small.as_mut_ptr()),
+                1,
+            )
+        };
+
+        if extracted == 0 {
+            return Err("图标资源不存在".to_string());
+        }
+
+        let icon = if !large[0].is_invalid() {
+            large[0]
+        } else {
+            small[0]
+        };
+        let unused = if !large[0].is_invalid() {
+            small[0]
+        } else {
+            large[0]
+        };
+        if !unused.is_invalid() {
+            unsafe {
+                let _ = DestroyIcon(unused);
+            }
+        }
+
+        if icon.is_invalid() {
+            Err("图标资源为空".to_string())
+        } else {
+            Ok(OwnedIcon(icon))
+        }
+    }
+
+    fn shell_file_icon(source: &str, large: bool) -> Result<OwnedIcon, String> {
+        let source_wide = wide_null(source);
+        let mut file_info = SHFILEINFOW::default();
+        let size = mem::size_of::<SHFILEINFOW>() as u32;
+        let flags = if large {
+            SHGFI_ICON | SHGFI_LARGEICON
+        } else {
+            SHGFI_ICON | SHGFI_SMALLICON
+        };
+
+        let result = unsafe {
+            SHGetFileInfoW(
+                PCWSTR(source_wide.as_ptr()),
+                FILE_FLAGS_AND_ATTRIBUTES(0),
+                Some(&mut file_info),
+                size,
+                flags,
+            )
+        };
+
+        if result == 0 || file_info.hIcon.is_invalid() {
+            Err("Shell 未返回文件图标".to_string())
+        } else {
+            Ok(OwnedIcon(file_info.hIcon))
+        }
+    }
+
+    fn hicon_to_png_data_url(icon: HICON) -> Result<String, String> {
+        let (width, height) = icon_size(icon).unwrap_or((32, 32));
+        let mut rgba = draw_icon_to_rgba(icon, width, height)?;
+
+        let mut any_alpha = false;
+        let mut any_visible_rgb = false;
+        for pixel in rgba.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+            any_alpha |= pixel[3] != 0;
+            any_visible_rgb |= pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0;
+        }
+
+        if !any_alpha && any_visible_rgb {
+            for pixel in rgba.chunks_exact_mut(4) {
+                pixel[3] = if pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0 {
+                    255
+                } else {
+                    0
+                };
+            }
+        }
+
+        let mut png = Vec::new();
+        let encoder = PngEncoder::new(&mut png);
+        encoder
+            .write_image(&rgba, width as u32, height as u32, ColorType::Rgba8.into())
+            .map_err(|error| format!("编码图标 PNG 失败：{error}"))?;
+
+        Ok(format!(
+            "data:image/png;base64,{}",
+            BASE64_STANDARD.encode(png)
+        ))
+    }
+
+    fn icon_size(icon: HICON) -> Option<(i32, i32)> {
+        let mut icon_info = unsafe { mem::zeroed() };
+        if unsafe { GetIconInfo(icon, &mut icon_info) }.is_err() {
+            return None;
+        }
+
+        let bitmap = if !icon_info.hbmColor.is_invalid() {
+            icon_info.hbmColor
+        } else {
+            icon_info.hbmMask
+        };
+
+        let mut info: BITMAP = unsafe { mem::zeroed() };
+        let result = if !bitmap.is_invalid() {
+            unsafe {
+                GetObjectW(
+                    HGDIOBJ(bitmap.0),
+                    mem::size_of::<BITMAP>() as i32,
+                    Some(&mut info as *mut _ as *mut c_void),
+                )
+            }
+        } else {
+            0
+        };
+
+        let used_color_bitmap = !icon_info.hbmColor.is_invalid();
+
+        if !icon_info.hbmColor.is_invalid() {
+            unsafe {
+                let _ = DeleteObject(HGDIOBJ(icon_info.hbmColor.0));
+            }
+        }
+        if !icon_info.hbmMask.is_invalid() {
+            unsafe {
+                let _ = DeleteObject(HGDIOBJ(icon_info.hbmMask.0));
+            }
+        }
+
+        if result == 0 || info.bmWidth <= 0 || info.bmHeight <= 0 {
+            return None;
+        }
+
+        let height = if used_color_bitmap {
+            info.bmHeight
+        } else {
+            info.bmHeight / 2
+        };
+
+        Some((info.bmWidth.clamp(16, 256), height.clamp(16, 256)))
+    }
+
+    fn draw_icon_to_rgba(icon: HICON, width: i32, height: i32) -> Result<Vec<u8>, String> {
+        let hdc = unsafe { CreateCompatibleDC(HDC::default()) };
+        if hdc.is_invalid() {
+            return Err("创建图标绘制上下文失败".to_string());
+        }
+
+        let mut bits: *mut c_void = ptr::null_mut();
+        let bitmap_info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                biHeight: -height,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let bitmap = match unsafe {
+            CreateDIBSection(
+                hdc,
+                &bitmap_info,
+                DIB_RGB_COLORS,
+                &mut bits,
+                HANDLE::default(),
+                0,
+            )
+        } {
+            Ok(bitmap) if !bits.is_null() => bitmap,
+            Ok(_) => {
+                unsafe {
+                    let _ = DeleteDC(hdc);
+                }
+                return Err("创建图标位图失败".to_string());
+            }
+            Err(error) => {
+                unsafe {
+                    let _ = DeleteDC(hdc);
+                }
+                return Err(format!("创建图标位图失败：{error}"));
+            }
+        };
+
+        let old_object = unsafe { SelectObject(hdc, HGDIOBJ(bitmap.0)) };
+        let drawn = unsafe {
+            DrawIconEx(
+                hdc,
+                0,
+                0,
+                icon,
+                width,
+                height,
+                0,
+                HBRUSH::default(),
+                DI_NORMAL,
+            )
+        }
+        .is_ok();
+        let byte_len = width as usize * height as usize * 4;
+        let rgba = if drawn {
+            unsafe { std::slice::from_raw_parts(bits as *const u8, byte_len) }.to_vec()
+        } else {
+            Vec::new()
+        };
+
+        unsafe {
+            if !old_object.is_invalid() {
+                let _ = SelectObject(hdc, old_object);
+            }
+            let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            let _ = DeleteDC(hdc);
+        }
+
+        if drawn {
+            Ok(rgba)
+        } else {
+            Err("绘制图标失败".to_string())
         }
     }
 
